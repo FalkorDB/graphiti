@@ -46,25 +46,28 @@ load_dotenv()
 
 # Neo4j connection parameters
 # Make sure Neo4j Desktop is running with a local DBMS started
-neo4j_uri = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
-neo4j_user = os.environ.get('NEO4J_USER', 'neo4j')
-neo4j_password = os.environ.get('NEO4J_PASSWORD', 'password')
+# uri = 'bolt://localhost:7687'
+# user = 'neo4j'
+# password = 'password'
+uri = 'falkor://localhost:6379'
+user = 'neo4j'
+password = 'password'
 
-if not neo4j_uri or not neo4j_user or not neo4j_password:
-    raise ValueError('NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD must be set')
+if not uri or not user or not password:
+    raise ValueError('URI, USER, and PASSWORD must be set for Graph database connection.')
 
 
 async def main():
     #################################################
     # INITIALIZATION
     #################################################
-    # Connect to Neo4j and set up Graphiti indices
+    # Connect to Neo4j/FalkorDB and set up Graphiti indices
     # This is required before using other Graphiti
     # functionality
     #################################################
 
-    # Initialize Graphiti with Neo4j connection
-    graphiti = Graphiti(neo4j_uri, neo4j_user, neo4j_password)
+    # Initialize Graphiti with Graph connection
+    graphiti = Graphiti(uri, user, password)
 
     try:
         # Initialize the graph database with graphiti's indices. This only needs to be done once.
@@ -125,7 +128,7 @@ async def main():
                 else json.dumps(episode['content']),
                 source=episode['type'],
                 source_description=episode['description'],
-                reference_time=datetime.now(timezone.utc),
+                reference_time=datetime.now(timezone.utc).isoformat(),
             )
             print(f'Added episode: Freakonomics Radio {i} ({episode["type"].value})')
 
@@ -224,7 +227,8 @@ async def main():
                 for key, value in node.attributes.items():
                     print(f'  {key}: {value}')
             print('---')
-
+    except Exception as e:
+        print(f'An error occurred: {e}')
     finally:
         #################################################
         # CLEANUP
@@ -239,4 +243,4 @@ async def main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    asyncio.run(main(), debug=True)

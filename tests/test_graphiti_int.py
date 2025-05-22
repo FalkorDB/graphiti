@@ -49,7 +49,9 @@ def setup_logging():
     console_handler.setLevel(logging.INFO)
 
     # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
 
     # Add formatter to console handler
     console_handler.setFormatter(formatter)
@@ -82,6 +84,8 @@ async def test_graph_integration():
     embedder = client.embedder
     driver = client.driver
 
+    await client.build_indices_and_constraints()
+
     now = datetime.now(timezone.utc)
     episode = EpisodicNode(
         name='test_episode',
@@ -92,6 +96,7 @@ async def test_graph_integration():
         source_description='conversation message',
         content='Alice likes Bob',
         entity_edges=[],
+        group_id='test',
     )
 
     alice_node = EntityNode(
@@ -99,16 +104,20 @@ async def test_graph_integration():
         labels=[],
         created_at=now,
         summary='Alice summary',
+        group_id='test',
     )
 
-    bob_node = EntityNode(name='Bob', labels=[], created_at=now, summary='Bob summary')
+    bob_node = EntityNode(name='Bob', labels=[], created_at=now, summary='Bob summary', group_id='test')
+
+    await alice_node.generate_name_embedding(embedder)
+    await bob_node.generate_name_embedding(embedder)
 
     episodic_edge_1 = EpisodicEdge(
-        source_node_uuid=episode.uuid, target_node_uuid=alice_node.uuid, created_at=now
+        source_node_uuid=episode.uuid, target_node_uuid=alice_node.uuid, created_at=now, group_id="test"
     )
 
     episodic_edge_2 = EpisodicEdge(
-        source_node_uuid=episode.uuid, target_node_uuid=bob_node.uuid, created_at=now
+        source_node_uuid=episode.uuid, target_node_uuid=bob_node.uuid, created_at=now, group_id='test'
     )
 
     entity_edge = EntityEdge(
@@ -121,6 +130,7 @@ async def test_graph_integration():
         expired_at=now,
         valid_at=now,
         invalid_at=now,
+        group_id='test'
     )
 
     await entity_edge.generate_embedding(embedder)
