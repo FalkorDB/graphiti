@@ -135,7 +135,7 @@ class FalkorDriver(GraphDriver):
         return records, header, None
 
     def session(self, database: str | None) -> GraphDriverSession:
-        return FalkorDriverSession(self._get_graph(database or self.graph_name))
+        return FalkorDriverSession(self._get_graph(self.graph_name))
 
     async def close(self) -> None:
         """Close the driver connection."""
