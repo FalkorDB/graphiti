@@ -101,6 +101,8 @@ class FalkorDriver(GraphDriver):
 
     async def execute_query(self, cypher_query_, **kwargs: Any):
         graph = self._get_graph(self.graph_name)
+        kwargs.pop('database_', DEFAULT_DATABASE)
+
 
         # Convert datetime objects to ISO strings (FalkorDB does not support datetime objects directly)
         params = convert_datetimes_to_strings(dict(kwargs))
