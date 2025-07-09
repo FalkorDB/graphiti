@@ -110,6 +110,7 @@ class Graphiti:
         store_raw_episode_content: bool = True,
         graph_driver: GraphDriver | None = None,
         max_coroutines: int | None = None,
+        graph_name: str | None = None,
     ):
         """
         Initialize a Graphiti instance.
@@ -142,6 +143,9 @@ class Graphiti:
         max_coroutines : int | None, optional
             The maximum number of concurrent operations allowed. Overrides SEMAPHORE_LIMIT set in the environment.
             If not set, the Graphiti default is used.
+        graph_name : str | None, optional
+            The name of the graph database to use. This is specifically used with FalkorDB driver.
+            If not provided, the default database name will be used.
 
         Returns
         -------
@@ -169,7 +173,15 @@ class Graphiti:
                 raise ValueError("uri must be provided when graph_driver is None")
             self.driver = Neo4jDriver(uri, user, password)
 
-        self.database = DEFAULT_DATABASE
+        # Set graph_name for FalkorDB driver
+        if graph_name and hasattr(self.driver, 'set_graph_name'):
+            self.driver.set_graph_name(graph_name)
+
+        # Set database name - use graph_name for FalkorDB, DEFAULT_DATABASE for others
+        if graph_name and hasattr(self.driver, 'set_graph_name'):
+            self.database = graph_name
+        else:
+            self.database = DEFAULT_DATABASE
         self.store_raw_episode_content = store_raw_episode_content
         self.max_coroutines = max_coroutines
         if llm_client:

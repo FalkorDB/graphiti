@@ -72,7 +72,7 @@ async def main():
 
     # Initialize Graphiti with FalkorDB connection
     falkor_driver = FalkorDriver(host=falkor_host, port=falkor_port, username=falkor_username, password=falkor_password)
-    graphiti = Graphiti(graph_driver=falkor_driver)
+    graphiti = Graphiti(graph_driver=falkor_driver, graph_name="my_knowledge_graph")
 
     try:
         # Initialize the graph database with graphiti's indices. This only needs to be done once.
