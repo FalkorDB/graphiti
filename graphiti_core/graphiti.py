@@ -367,7 +367,7 @@ class Graphiti:
         source_description: str,
         reference_time: datetime,
         source: EpisodeType = EpisodeType.message,
-        group_id: str = '',
+        group_id: str = '_',
         uuid: str | None = None,
         update_communities: bool = False,
         entity_types: dict[str, BaseModel] | None = None,
@@ -549,7 +549,7 @@ class Graphiti:
             raise e
 
     #### WIP: USE AT YOUR OWN RISK ####
-    async def add_episode_bulk(self, bulk_episodes: list[RawEpisode], group_id: str = ''):
+    async def add_episode_bulk(self, bulk_episodes: list[RawEpisode], group_id: str = '_'):
         """
         Process multiple episodes in bulk and update the graph.
 
