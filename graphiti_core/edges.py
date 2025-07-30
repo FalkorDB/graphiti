@@ -376,7 +376,8 @@ class CommunityEdge(Edge):
     async def get_by_uuid(cls, driver: GraphDriver, uuid: str):
         records, _, _ = await driver.execute_query(
             """
-        MATCH (n:Community)-[e:HAS_MEMBER {uuid: $uuid}]->(m:Entity | Community)
+        MATCH (n:Community)-[e:HAS_MEMBER {uuid: $uuid}]->(m)
+        WHERE m:Entity OR m:Community
         RETURN
             e.uuid As uuid,
             e.group_id AS group_id,
@@ -396,8 +397,8 @@ class CommunityEdge(Edge):
     async def get_by_uuids(cls, driver: GraphDriver, uuids: list[str]):
         records, _, _ = await driver.execute_query(
             """
-        MATCH (n:Community)-[e:HAS_MEMBER]->(m:Entity | Community)
-        WHERE e.uuid IN $uuids
+        MATCH (n:Community)-[e:HAS_MEMBER]->(m)
+        WHERE e.uuid IN $uuids AND (m:Entity OR m:Community)
         RETURN
             e.uuid As uuid,
             e.group_id AS group_id,
@@ -426,8 +427,8 @@ class CommunityEdge(Edge):
 
         records, _, _ = await driver.execute_query(
             """
-        MATCH (n:Community)-[e:HAS_MEMBER]->(m:Entity | Community)
-        WHERE e.group_id IN $group_ids
+        MATCH (n:Community)-[e:HAS_MEMBER]->(m)
+        WHERE e.group_id IN $group_ids AND (m:Entity OR m:Community)
         """
             + cursor_query
             + """

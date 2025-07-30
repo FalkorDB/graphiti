@@ -35,7 +35,6 @@ ENTITY_EDGE_SAVE = """
         MATCH (target:Entity {uuid: $edge_data.target_uuid}) 
         MERGE (source)-[r:RELATES_TO {uuid: $edge_data.uuid}]->(target)
         SET r = $edge_data
-        WITH r CALL db.create.setRelationshipVectorProperty(r, "fact_embedding", $edge_data.fact_embedding)
         RETURN r.uuid AS uuid"""
 
 ENTITY_EDGE_SAVE_BULK = """
@@ -44,13 +43,13 @@ ENTITY_EDGE_SAVE_BULK = """
     MATCH (target:Entity {uuid: edge.target_node_uuid}) 
     MERGE (source)-[r:RELATES_TO {uuid: edge.uuid}]->(target)
     SET r = edge
-    WITH r, edge CALL db.create.setRelationshipVectorProperty(r, "fact_embedding", edge.fact_embedding)
     RETURN edge.uuid AS uuid
 """
 
 COMMUNITY_EDGE_SAVE = """
         MATCH (community:Community {uuid: $community_uuid}) 
-        MATCH (node:Entity | Community {uuid: $entity_uuid}) 
+        MATCH (node {uuid: $entity_uuid})
+        WHERE node:Entity OR node:Community 
         MERGE (community)-[r:HAS_MEMBER {uuid: $uuid}]->(node)
         SET r = {uuid: $uuid, group_id: $group_id, created_at: $created_at}
         RETURN r.uuid AS uuid"""
