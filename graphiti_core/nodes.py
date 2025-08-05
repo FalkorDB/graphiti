@@ -309,25 +309,64 @@ class EntityNode(Node):
         self.name_embedding = records[0]['name_embedding']
 
     async def save(self, driver: GraphDriver):
-        entity_data: dict[str, Any] = {
-            'uuid': self.uuid,
-            'name': self.name,
-            'name_embedding': self.name_embedding,
-            'group_id': self.group_id,
-            'summary': self.summary,
-            'created_at': self.created_at,
-        }
+        # Use database-specific save logic for vector handling
+        if driver.provider == 'falkordb':
+            # For FalkorDB, handle vector conversion separately
+            entity_data: dict[str, Any] = {
+                'uuid': self.uuid,
+                'name': self.name,
+                'group_id': self.group_id,
+                'summary': self.summary,
+                'created_at': self.created_at,
+            }
+            entity_data.update(self.attributes or {})
+            
+            # Save node without embedding first
+            await driver.execute_query(
+                """
+                MERGE (n:Entity {uuid: $entity_data.uuid})
+                SET n:$($labels)
+                SET n = $entity_data
+                """,
+                labels=self.labels + ['Entity'],
+                entity_data=entity_data,
+            )
+            
+            # Set the embedding separately if it exists
+            if self.name_embedding is not None:
+                result = await driver.execute_query(
+                    """
+                    MATCH (n:Entity {uuid: $uuid})
+                    SET n.name_embedding = vecf32($name_embedding)
+                    RETURN n.uuid AS uuid
+                    """,
+                    uuid=self.uuid,
+                    name_embedding=self.name_embedding,
+                )
+            else:
+                result = await driver.execute_query(
+                    "MATCH (n:Entity {uuid: $uuid}) RETURN n.uuid AS uuid",
+                    uuid=self.uuid,
+                )
+        else:
+            # For Neo4j, use the original logic
+            entity_data: dict[str, Any] = {
+                'uuid': self.uuid,
+                'name': self.name,
+                'name_embedding': self.name_embedding,
+                'group_id': self.group_id,
+                'summary': self.summary,
+                'created_at': self.created_at,
+            }
+            entity_data.update(self.attributes or {})
 
-        entity_data.update(self.attributes or {})
-
-        result = await driver.execute_query(
-            ENTITY_NODE_SAVE,
-            labels=self.labels + ['Entity'],
-            entity_data=entity_data,
-        )
+            result = await driver.execute_query(
+                ENTITY_NODE_SAVE,
+                labels=self.labels + ['Entity'],
+                entity_data=entity_data,
+            )
 
         logger.debug(f'Saved Node to Graph: {self.uuid}')
-
         return result
 
     @classmethod
@@ -412,18 +451,50 @@ class CommunityNode(Node):
     summary: str = Field(description='region summary of member nodes', default_factory=str)
 
     async def save(self, driver: GraphDriver):
-        result = await driver.execute_query(
-            COMMUNITY_NODE_SAVE,
-            uuid=self.uuid,
-            name=self.name,
-            group_id=self.group_id,
-            summary=self.summary,
-            name_embedding=self.name_embedding,
-            created_at=self.created_at,
-        )
+        # Use database-specific save logic for vector handling
+        if driver.provider == 'falkordb':
+            # For FalkorDB, handle vector conversion separately
+            await driver.execute_query(
+                """
+                MERGE (n:Community {uuid: $uuid})
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at}
+                """,
+                uuid=self.uuid,
+                name=self.name,
+                group_id=self.group_id,
+                summary=self.summary,
+                created_at=self.created_at,
+            )
+            
+            # Set the embedding separately if it exists
+            if self.name_embedding is not None:
+                result = await driver.execute_query(
+                    """
+                    MATCH (n:Community {uuid: $uuid})
+                    SET n.name_embedding = vecf32($name_embedding)
+                    RETURN n.uuid AS uuid
+                    """,
+                    uuid=self.uuid,
+                    name_embedding=self.name_embedding,
+                )
+            else:
+                result = await driver.execute_query(
+                    "MATCH (n:Community {uuid: $uuid}) RETURN n.uuid AS uuid",
+                    uuid=self.uuid,
+                )
+        else:
+            # For Neo4j, use the original logic
+            result = await driver.execute_query(
+                COMMUNITY_NODE_SAVE,
+                uuid=self.uuid,
+                name=self.name,
+                group_id=self.group_id,
+                summary=self.summary,
+                name_embedding=self.name_embedding,
+                created_at=self.created_at,
+            )
 
         logger.debug(f'Saved Node to Graph: {self.uuid}')
-
         return result
 
     async def generate_name_embedding(self, embedder: EmbedderClient):
