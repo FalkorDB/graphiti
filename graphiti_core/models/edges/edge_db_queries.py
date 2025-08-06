@@ -128,4 +128,3 @@ COMMUNITY_EDGE_RETURN = """
     m.uuid AS target_node_uuid,
     e.created_at AS created_at
 """
-
