@@ -127,4 +127,5 @@ COMMUNITY_EDGE_RETURN = """
     n.uuid AS source_node_uuid,
     m.uuid AS target_node_uuid,
     e.created_at AS created_at
-""" 
+"""
+
