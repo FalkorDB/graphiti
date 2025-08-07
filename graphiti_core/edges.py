@@ -214,30 +214,74 @@ class EntityEdge(Edge):
         self.fact_embedding = records[0]['fact_embedding']
 
     async def save(self, driver: GraphDriver):
-        edge_data: dict[str, Any] = {
-            'source_uuid': self.source_node_uuid,
-            'target_uuid': self.target_node_uuid,
-            'uuid': self.uuid,
-            'name': self.name,
-            'group_id': self.group_id,
-            'fact': self.fact,
-            'fact_embedding': self.fact_embedding,
-            'episodes': self.episodes,
-            'created_at': self.created_at,
-            'expired_at': self.expired_at,
-            'valid_at': self.valid_at,
-            'invalid_at': self.invalid_at,
-        }
+        # Use database-specific save logic for vector handling
+        if driver.provider == 'falkordb':
+            # For FalkorDB, handle vector conversion separately
+            edge_data: dict[str, Any] = {
+                'source_uuid': self.source_node_uuid,
+                'target_uuid': self.target_node_uuid,
+                'uuid': self.uuid,
+                'name': self.name,
+                'group_id': self.group_id,
+                'fact': self.fact,
+                'episodes': self.episodes,
+                'created_at': self.created_at,
+                'expired_at': self.expired_at,
+                'valid_at': self.valid_at,
+                'invalid_at': self.invalid_at,
+            }
+            edge_data.update(self.attributes or {})
 
-        edge_data.update(self.attributes or {})
+            # Save edge without embedding first
+            await driver.execute_query(
+                """
+                MATCH (source:Entity {uuid: $edge_data.source_uuid}), (target:Entity {uuid: $edge_data.target_uuid})
+                MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
+                SET e = $edge_data
+                """,
+                edge_data=edge_data,
+            )
+            
+            # Set the embedding separately if it exists
+            if self.fact_embedding is not None:
+                result = await driver.execute_query(
+                    """
+                    MATCH (source:Entity)-[e:RELATES_TO {uuid: $uuid}]->(target:Entity)
+                    SET e.fact_embedding = vecf32($fact_embedding)
+                    RETURN e.uuid AS uuid
+                    """,
+                    uuid=self.uuid,
+                    fact_embedding=self.fact_embedding,
+                )
+            else:
+                result = await driver.execute_query(
+                    "MATCH (source:Entity)-[e:RELATES_TO {uuid: $uuid}]->(target:Entity) RETURN e.uuid AS uuid",
+                    uuid=self.uuid,
+                )
+        else:
+            # For Neo4j, use the original logic
+            edge_data: dict[str, Any] = {
+                'source_uuid': self.source_node_uuid,
+                'target_uuid': self.target_node_uuid,
+                'uuid': self.uuid,
+                'name': self.name,
+                'group_id': self.group_id,
+                'fact': self.fact,
+                'fact_embedding': self.fact_embedding,
+                'episodes': self.episodes,
+                'created_at': self.created_at,
+                'expired_at': self.expired_at,
+                'valid_at': self.valid_at,
+                'invalid_at': self.invalid_at,
+            }
+            edge_data.update(self.attributes or {})
 
-        result = await driver.execute_query(
-            get_entity_edge_save_query(driver.provider),
-            edge_data=edge_data,
-        )
+            result = await driver.execute_query(
+                ENTITY_EDGE_SAVE,
+                edge_data=edge_data,
+            )
 
         logger.debug(f'Saved edge to Graph: {self.uuid}')
-
         return result
 
     @classmethod
