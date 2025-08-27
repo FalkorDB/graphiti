@@ -216,6 +216,15 @@ class FalkorDriver(GraphDriver):
         for query in index_queries:
             await self.execute_query(query)
 
+    async def health_check(self) -> None:
+        """Check FalkorDB connectivity by running a simple query."""
+        try:
+            await self.execute_query("MATCH (n) RETURN 1 LIMIT 1")
+            return None
+        except Exception as e:
+            print(f"FalkorDB health check failed: {e}")
+            raise
+
     def clone(self, database: str) -> 'GraphDriver':
         """
         Returns a shallow copy of this driver with a different default database.
@@ -305,7 +314,6 @@ class FalkorDriver(GraphDriver):
         return full_query
 
 
-
 def convert_datetimes_to_strings(obj):
     if isinstance(obj, dict):
         return {k: convert_datetimes_to_strings(v) for k, v in obj.items()}
@@ -317,4 +325,3 @@ def convert_datetimes_to_strings(obj):
         return obj.isoformat()
     else:
         return obj
-    
