@@ -21,7 +21,7 @@ from graphiti_core.driver.driver import GraphProvider
 EPISODIC_NODE_SAVE = """
     MERGE (n:Episodic {uuid: $uuid})
     SET n = {uuid: $uuid, name: $name, group_id: $group_id, source_description: $source_description, source: $source, content: $content,
-    entity_edges: $entity_edges, created_at: $created_at, valid_at: $valid_at}
+    entity_edges: $entity_edges, created_at: $created_at, valid_at: $valid_at, timestamp: timestamp()}
     RETURN n.uuid AS uuid
 """
 
@@ -30,7 +30,7 @@ EPISODIC_NODE_SAVE_BULK = """
     MERGE (n:Episodic {uuid: episode.uuid})
     SET n = {uuid: episode.uuid, name: episode.name, group_id: episode.group_id, source_description: episode.source_description,
         source: episode.source, content: episode.content,
-    entity_edges: episode.entity_edges, created_at: episode.created_at, valid_at: episode.valid_at}
+    entity_edges: episode.entity_edges, created_at: episode.created_at, valid_at: episode.valid_at, timestamp: timestamp()}
     RETURN n.uuid AS uuid
 """
 
@@ -53,6 +53,7 @@ def get_entity_node_save_query(provider: GraphProvider, labels: str) -> str:
             MERGE (n:Entity {{uuid: $entity_data.uuid}})
             SET n:{labels}
             SET n = $entity_data
+            SET n.timestamp = timestamp()
             RETURN n.uuid AS uuid
         """
 
@@ -77,6 +78,7 @@ def get_entity_node_save_bulk_query(provider: GraphProvider, nodes: list[dict]) 
                         MERGE (n:Entity {{uuid: node.uuid}})
                         SET n:{label}
                         SET n = node
+                        SET n.timestamp = timestamp()
                         WITH n, node
                         SET n.name_embedding = vecf32(node.name_embedding)
                         RETURN n.uuid AS uuid
@@ -111,7 +113,7 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
     if provider == GraphProvider.FALKORDB:
         return """
             MERGE (n:Community {uuid: $uuid})
-            SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at, name_embedding: vecf32($name_embedding)}
+            SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at, name_embedding: vecf32($name_embedding), timestamp: timestamp()}
             RETURN n.uuid AS uuid
         """
 
@@ -121,7 +123,6 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
         WITH n CALL db.create.setNodeVectorProperty(n, "name_embedding", $name_embedding)
         RETURN n.uuid AS uuid
     """
-
 
 COMMUNITY_NODE_RETURN = """
     n.uuid AS uuid,
