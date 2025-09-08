@@ -51,6 +51,7 @@ services:
     image: falkordb/falkordb:latest
     ports:
       - "6379:6379"
+      - "3000:3000"
     command: ["falkordb-server", "--loadmodule", "/FalkorDB/bin/src/falkordb.so"]
     volumes:
       - falkordb_data:/data
