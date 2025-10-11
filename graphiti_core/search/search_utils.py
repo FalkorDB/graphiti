@@ -23,7 +23,10 @@ import numpy as np
 from numpy._typing import NDArray
 from typing_extensions import LiteralString
 
-from graphiti_core.driver.driver import GraphDriver, GraphProvider
+from graphiti_core.driver.driver import (
+    GraphDriver,
+    GraphProvider,
+)
 from graphiti_core.edges import EntityEdge, get_entity_edge_from_record
 from graphiti_core.graph_queries import (
     get_nodes_query,
@@ -51,8 +54,6 @@ from graphiti_core.nodes import (
 )
 from graphiti_core.search.search_filters import (
     SearchFilters,
-    build_aoss_edge_filters,
-    build_aoss_node_filters,
     edge_search_filter_query_constructor,
     node_search_filter_query_constructor,
 )
@@ -86,6 +87,8 @@ def fulltext_query(query: str, group_ids: list[str] | None, driver: GraphDriver)
         if len(query.split(' ')) > MAX_QUERY_LENGTH:
             return ''
         return query
+    elif driver.provider == GraphProvider.FALKORDB:
+        return driver.build_fulltext_query(query, group_ids, MAX_QUERY_LENGTH)
     group_ids_filter_list = (
         [driver.fulltext_syntax + f'group_id:"{g}"' for g in group_ids]
         if group_ids is not None
@@ -171,6 +174,11 @@ async def edge_fulltext_search(
     group_ids: list[str] | None = None,
     limit=RELEVANT_SCHEMA_LIMIT,
 ) -> list[EntityEdge]:
+    if driver.search_interface:
+        return await driver.search_interface.edge_fulltext_search(
+            driver, query, search_filter, group_ids, limit
+        )
+
     # fulltext search over facts
     fuzzy_query = fulltext_query(query, group_ids, driver)
 
@@ -209,11 +217,11 @@ async def edge_fulltext_search(
             # Match the edge ids and return the values
             query = (
                 """
-                                                                                            UNWIND $ids as id
-                                                                                            MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
-                                                                                            WHERE e.group_id IN $group_ids 
-                                                                                            AND id(e)=id 
-                                                                                            """
+                        UNWIND $ids as id
+                        MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
+                        WHERE e.group_id IN $group_ids 
+                        AND id(e)=id 
+                        """
                 + filter_query
                 + """
                 AND id(e)=id
@@ -243,31 +251,6 @@ async def edge_fulltext_search(
                 routing_='r',
                 **filter_params,
             )
-        else:
-            return []
-    elif driver.aoss_client:
-        route = group_ids[0] if group_ids else None
-        filters = build_aoss_edge_filters(group_ids or [], search_filter)
-        res = driver.aoss_client.search(
-            index='entity_edges',
-            routing=route,
-            _source=['uuid'],
-            query={
-                'bool': {
-                    'filter': filters,
-                    'must': [{'match': {'fact': {'query': query, 'operator': 'or'}}}],
-                }
-            },
-        )
-        if res['hits']['total']['value'] > 0:
-            input_uuids = {}
-            for r in res['hits']['hits']:
-                input_uuids[r['_source']['uuid']] = r['_score']
-
-            # Get edges
-            entity_edges = await EntityEdge.get_by_uuids(driver, list(input_uuids.keys()))
-            entity_edges.sort(key=lambda e: input_uuids.get(e.uuid, 0), reverse=True)
-            return entity_edges
         else:
             return []
     else:
@@ -309,6 +292,18 @@ async def edge_similarity_search(
     limit: int = RELEVANT_SCHEMA_LIMIT,
     min_score: float = DEFAULT_MIN_SCORE,
 ) -> list[EntityEdge]:
+    if driver.search_interface:
+        return await driver.search_interface.edge_similarity_search(
+            driver,
+            search_vector,
+            source_node_uuid,
+            target_node_uuid,
+            search_filter,
+            group_ids,
+            limit,
+            min_score,
+        )
+
     match_query = """
         MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
     """
@@ -344,8 +339,8 @@ async def edge_similarity_search(
     if driver.provider == GraphProvider.NEPTUNE:
         query = (
             """
-                                                                    MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
-                                                                    """
+                    MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
+                    """
             + filter_query
             + """
             RETURN DISTINCT id(e) as id, e.fact_embedding as embedding
@@ -403,32 +398,6 @@ async def edge_similarity_search(
             )
         else:
             return []
-    elif driver.aoss_client:
-        route = group_ids[0] if group_ids else None
-        filters = build_aoss_edge_filters(group_ids or [], search_filter)
-        res = driver.aoss_client.search(
-            index='entity_edges',
-            routing=route,
-            _source=['uuid'],
-            knn={
-                'field': 'fact_embedding',
-                'query_vector': search_vector,
-                'k': limit,
-                'num_candidates': 1000,
-            },
-            query={'bool': {'filter': filters}},
-        )
-
-        if res['hits']['total']['value'] > 0:
-            input_uuids = {}
-            for r in res['hits']['hits']:
-                input_uuids[r['_source']['uuid']] = r['_score']
-
-            # Get edges
-            entity_edges = await EntityEdge.get_by_uuids(driver, list(input_uuids.keys()))
-            entity_edges.sort(key=lambda e: input_uuids.get(e.uuid, 0), reverse=True)
-            return entity_edges
-
     else:
         query = (
             match_query
@@ -591,6 +560,11 @@ async def node_fulltext_search(
     group_ids: list[str] | None = None,
     limit=RELEVANT_SCHEMA_LIMIT,
 ) -> list[EntityNode]:
+    if driver.search_interface:
+        return await driver.search_interface.node_fulltext_search(
+            driver, query, search_filter, group_ids, limit
+        )
+
     # BM25 search to get top nodes
     fuzzy_query = fulltext_query(query, group_ids, driver)
     if fuzzy_query == '':
@@ -622,11 +596,11 @@ async def node_fulltext_search(
             # Match the edge ides and return the values
             query = (
                 """
-                                                                                            UNWIND $ids as i
-                                                                                            MATCH (n:Entity)
-                                                                                            WHERE n.uuid=i.id
-                                                                                            RETURN
-                                                                            """
+                        UNWIND $ids as i
+                        MATCH (n:Entity)
+                        WHERE n.uuid=i.id
+                        RETURN
+                        """
                 + get_entity_node_return_query(driver.provider)
                 + """
                 ORDER BY i.score DESC
@@ -641,41 +615,6 @@ async def node_fulltext_search(
                 routing_='r',
                 **filter_params,
             )
-        else:
-            return []
-    elif driver.aoss_client:
-        route = group_ids[0] if group_ids else None
-        filters = build_aoss_node_filters(group_ids or [], search_filter)
-        res = driver.aoss_client.search(
-            'entities',
-            routing=route,
-            _source=['uuid'],
-            query={
-                'bool': {
-                    'filter': filters,
-                    'must': [
-                        {
-                            'multi_match': {
-                                'query': query,
-                                'field': ['name', 'summary'],
-                                'operator': 'or',
-                            }
-                        }
-                    ],
-                }
-            },
-            limit=limit,
-        )
-
-        if res['hits']['total']['value'] > 0:
-            input_uuids = {}
-            for r in res['hits']['hits']:
-                input_uuids[r['_source']['uuid']] = r['_score']
-
-            # Get nodes
-            entities = await EntityNode.get_by_uuids(driver, list(input_uuids.keys()))
-            entities.sort(key=lambda e: input_uuids.get(e.uuid, 0), reverse=True)
-            return entities
         else:
             return []
     else:
@@ -715,6 +654,11 @@ async def node_similarity_search(
     limit=RELEVANT_SCHEMA_LIMIT,
     min_score: float = DEFAULT_MIN_SCORE,
 ) -> list[EntityNode]:
+    if driver.search_interface:
+        return await driver.search_interface.node_similarity_search(
+            driver, search_vector, search_filter, group_ids, limit, min_score
+        )
+
     filter_queries, filter_params = node_search_filter_query_constructor(
         search_filter, driver.provider
     )
@@ -734,8 +678,8 @@ async def node_similarity_search(
     if driver.provider == GraphProvider.NEPTUNE:
         query = (
             """
-                                                                    MATCH (n:Entity)
-                                                                    """
+                                                                                                                            MATCH (n:Entity)
+                                                                                                                            """
             + filter_query
             + """
             RETURN DISTINCT id(n) as id, n.name_embedding as embedding
@@ -764,11 +708,11 @@ async def node_similarity_search(
             # Match the edge ides and return the values
             query = (
                 """
-                                                                                                UNWIND $ids as i
-                                                                                                MATCH (n:Entity)
-                                                                                                WHERE id(n)=i.id
-                                                                                                RETURN 
-                                                                                                """
+                                                                                                                                                        UNWIND $ids as i
+                                                                                                                                                        MATCH (n:Entity)
+                                                                                                                                                        WHERE id(n)=i.id
+                                                                                                                                                        RETURN 
+                                                                                                                                                        """
                 + get_entity_node_return_query(driver.provider)
                 + """
                     ORDER BY i.score DESC
@@ -786,36 +730,11 @@ async def node_similarity_search(
             )
         else:
             return []
-    elif driver.aoss_client:
-        route = group_ids[0] if group_ids else None
-        filters = build_aoss_node_filters(group_ids or [], search_filter)
-        res = driver.aoss_client.search(
-            index='entities',
-            routing=route,
-            _source=['uuid'],
-            knn={
-                'field': 'fact_embedding',
-                'query_vector': search_vector,
-                'k': limit,
-                'num_candidates': 1000,
-            },
-            query={'bool': {'filter': filters}},
-        )
-
-        if res['hits']['total']['value'] > 0:
-            input_uuids = {}
-            for r in res['hits']['hits']:
-                input_uuids[r['_source']['uuid']] = r['_score']
-
-            # Get edges
-            entity_nodes = await EntityNode.get_by_uuids(driver, list(input_uuids.keys()))
-            entity_nodes.sort(key=lambda e: input_uuids.get(e.uuid, 0), reverse=True)
-            return entity_nodes
     else:
         query = (
             """
-                                                                    MATCH (n:Entity)
-                                                                    """
+                                                                                                                            MATCH (n:Entity)
+                                                                                                                            """
             + filter_query
             + """
             WITH n, """
@@ -940,6 +859,11 @@ async def episode_fulltext_search(
     group_ids: list[str] | None = None,
     limit=RELEVANT_SCHEMA_LIMIT,
 ) -> list[EpisodicNode]:
+    if driver.search_interface:
+        return await driver.search_interface.episode_fulltext_search(
+            driver, query, _search_filter, group_ids, limit
+        )
+
     # BM25 search to get top episodes
     fuzzy_query = fulltext_query(query, group_ids, driver)
     if fuzzy_query == '':
@@ -984,40 +908,6 @@ async def episode_fulltext_search(
                 routing_='r',
                 **filter_params,
             )
-        else:
-            return []
-    elif driver.aoss_client:
-        route = group_ids[0] if group_ids else None
-        res = driver.aoss_client.search(
-            'episodes',
-            routing=route,
-            _source=['uuid'],
-            query={
-                'bool': {
-                    'filter': {'terms': group_ids},
-                    'must': [
-                        {
-                            'multi_match': {
-                                'query': query,
-                                'field': ['name', 'content'],
-                                'operator': 'or',
-                            }
-                        }
-                    ],
-                }
-            },
-            limit=limit,
-        )
-
-        if res['hits']['total']['value'] > 0:
-            input_uuids = {}
-            for r in res['hits']['hits']:
-                input_uuids[r['_source']['uuid']] = r['_score']
-
-            # Get nodes
-            episodes = await EpisodicNode.get_by_uuids(driver, list(input_uuids.keys()))
-            episodes.sort(key=lambda e: input_uuids.get(e.uuid, 0), reverse=True)
-            return episodes
         else:
             return []
     else:
@@ -1147,8 +1037,8 @@ async def community_similarity_search(
     if driver.provider == GraphProvider.NEPTUNE:
         query = (
             """
-                                                                    MATCH (n:Community)
-                                                                    """
+                                                                                                                            MATCH (n:Community)
+                                                                                                                            """
             + group_filter_query
             + """
             RETURN DISTINCT id(n) as id, n.name_embedding as embedding
@@ -1207,8 +1097,8 @@ async def community_similarity_search(
 
         query = (
             """
-                                                                    MATCH (c:Community)
-                                                                    """
+                                                                                                                            MATCH (c:Community)
+                                                                                                                            """
             + group_filter_query
             + """
             WITH c,
@@ -1350,9 +1240,9 @@ async def get_relevant_nodes(
         # FIXME: Kuzu currently does not support using variables such as `node.fulltext_query` as an input to FTS, which means `get_relevant_nodes()` won't work with Kuzu as the graph driver.
         query = (
             """
-                                                                    UNWIND $nodes AS node
-                                                                    MATCH (n:Entity {group_id: $group_id})
-                                                                    """
+                                                                                                                            UNWIND $nodes AS node
+                                                                                                                            MATCH (n:Entity {group_id: $group_id})
+                                                                                                                            """
             + filter_query
             + """
             WITH node, n, """
@@ -1397,9 +1287,9 @@ async def get_relevant_nodes(
     else:
         query = (
             """
-                                                                    UNWIND $nodes AS node
-                                                                    MATCH (n:Entity {group_id: $group_id})
-                                                                    """
+                                                                                                                            UNWIND $nodes AS node
+                                                                                                                            MATCH (n:Entity {group_id: $group_id})
+                                                                                                                            """
             + filter_query
             + """
             WITH node, n, """
@@ -1488,9 +1378,9 @@ async def get_relevant_edges(
     if driver.provider == GraphProvider.NEPTUNE:
         query = (
             """
-                                                                    UNWIND $edges AS edge
-                                                                    MATCH (n:Entity {uuid: edge.source_node_uuid})-[e:RELATES_TO {group_id: edge.group_id}]-(m:Entity {uuid: edge.target_node_uuid})
-                                                                    """
+                                                                                                                            UNWIND $edges AS edge
+                                                                                                                            MATCH (n:Entity {uuid: edge.source_node_uuid})-[e:RELATES_TO {group_id: edge.group_id}]-(m:Entity {uuid: edge.target_node_uuid})
+                                                                                                                            """
             + filter_query
             + """
             WITH e, edge
@@ -1560,9 +1450,9 @@ async def get_relevant_edges(
 
             query = (
                 """
-                                                                        UNWIND $edges AS edge
-                                                                        MATCH (n:Entity {uuid: edge.source_node_uuid})-[:RELATES_TO]-(e:RelatesToNode_ {group_id: edge.group_id})-[:RELATES_TO]-(m:Entity {uuid: edge.target_node_uuid})
-                                                                        """
+                                                                                                                                UNWIND $edges AS edge
+                                                                                                                                MATCH (n:Entity {uuid: edge.source_node_uuid})-[:RELATES_TO]-(e:RelatesToNode_ {group_id: edge.group_id})-[:RELATES_TO]-(m:Entity {uuid: edge.target_node_uuid})
+                                                                                                                                """
                 + filter_query
                 + """
                 WITH e, edge, n, m, """
@@ -1598,9 +1488,9 @@ async def get_relevant_edges(
         else:
             query = (
                 """
-                                                                        UNWIND $edges AS edge
-                                                                        MATCH (n:Entity {uuid: edge.source_node_uuid})-[e:RELATES_TO {group_id: edge.group_id}]-(m:Entity {uuid: edge.target_node_uuid})
-                                                                        """
+                                                                                                                                UNWIND $edges AS edge
+                                                                                                                                MATCH (n:Entity {uuid: edge.source_node_uuid})-[e:RELATES_TO {group_id: edge.group_id}]-(m:Entity {uuid: edge.target_node_uuid})
+                                                                                                                                """
                 + filter_query
                 + """
                 WITH e, edge, """
@@ -1673,10 +1563,10 @@ async def get_edge_invalidation_candidates(
     if driver.provider == GraphProvider.NEPTUNE:
         query = (
             """
-                                                                    UNWIND $edges AS edge
-                                                                    MATCH (n:Entity)-[e:RELATES_TO {group_id: edge.group_id}]->(m:Entity)
-                                                                    WHERE n.uuid IN [edge.source_node_uuid, edge.target_node_uuid] OR m.uuid IN [edge.target_node_uuid, edge.source_node_uuid]
-                                                                    """
+                                                                                                                            UNWIND $edges AS edge
+                                                                                                                            MATCH (n:Entity)-[e:RELATES_TO {group_id: edge.group_id}]->(m:Entity)
+                                                                                                                            WHERE n.uuid IN [edge.source_node_uuid, edge.target_node_uuid] OR m.uuid IN [edge.target_node_uuid, edge.source_node_uuid]
+                                                                                                                            """
             + filter_query
             + """
             WITH e, edge
@@ -1746,10 +1636,10 @@ async def get_edge_invalidation_candidates(
 
             query = (
                 """
-                                                                        UNWIND $edges AS edge
-                                                                        MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_ {group_id: edge.group_id})-[:RELATES_TO]->(m:Entity)
-                                                                        WHERE (n.uuid IN [edge.source_node_uuid, edge.target_node_uuid] OR m.uuid IN [edge.target_node_uuid, edge.source_node_uuid])
-                                                                        """
+                                                                                                                                UNWIND $edges AS edge
+                                                                                                                                MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_ {group_id: edge.group_id})-[:RELATES_TO]->(m:Entity)
+                                                                                                                                WHERE (n.uuid IN [edge.source_node_uuid, edge.target_node_uuid] OR m.uuid IN [edge.target_node_uuid, edge.source_node_uuid])
+                                                                                                                                """
                 + filter_query
                 + """
                 WITH edge, e, n, m, """
@@ -1785,10 +1675,10 @@ async def get_edge_invalidation_candidates(
         else:
             query = (
                 """
-                                                                        UNWIND $edges AS edge
-                                                                        MATCH (n:Entity)-[e:RELATES_TO {group_id: edge.group_id}]->(m:Entity)
-                                                                        WHERE n.uuid IN [edge.source_node_uuid, edge.target_node_uuid] OR m.uuid IN [edge.target_node_uuid, edge.source_node_uuid]
-                                                                        """
+                                                                                                                                UNWIND $edges AS edge
+                                                                                                                                MATCH (n:Entity)-[e:RELATES_TO {group_id: edge.group_id}]->(m:Entity)
+                                                                                                                                WHERE n.uuid IN [edge.source_node_uuid, edge.target_node_uuid] OR m.uuid IN [edge.target_node_uuid, edge.source_node_uuid]
+                                                                                                                                """
                 + filter_query
                 + """
                 WITH edge, e, """

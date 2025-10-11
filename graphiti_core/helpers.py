@@ -27,6 +27,7 @@ from neo4j import time as neo4j_time
 from numpy._typing import NDArray
 from pydantic import BaseModel
 
+from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.errors import GroupIdValidationError
 
 load_dotenv()
@@ -45,6 +46,18 @@ def parse_db_date(input_date: neo4j_time.DateTime | str | None) -> datetime | No
         return datetime.fromisoformat(input_date)
 
     return input_date
+
+
+def get_default_group_id(provider: GraphProvider) -> str:
+    """
+    This function differentiates the default group id based on the database type.
+    For most databases, the default group id is an empty string, while there are database types that require a specific default group id.
+    """
+    if provider == GraphProvider.FALKORDB:
+        return '\\_'
+    else:
+        return ''
+
 
 def lucene_sanitize(query: str) -> str:
     # Escape special characters from a query before passing into Lucene
