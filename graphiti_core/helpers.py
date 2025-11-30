@@ -38,14 +38,42 @@ MAX_REFLEXION_ITERATIONS = int(os.getenv('MAX_REFLEXION_ITERATIONS', 0))
 DEFAULT_PAGE_LIMIT = 20
 
 
-def parse_db_date(input_date: neo4j_time.DateTime | str | None) -> datetime | None:
+def parse_db_date(input_date: neo4j_time.DateTime | datetime | str | None) -> datetime | None:
+    """
+    Parse datetime from various database formats.
+
+    Handles:
+    - Neo4j: neo4j_time.DateTime objects
+    - FalkorDB (native): Python datetime objects
+    - FalkorDB (legacy): ISO strings
+    - Neptune: ISO strings
+
+    Args:
+        input_date: Date value from database
+
+    Returns:
+        Python datetime object or None
+    """
+    if input_date is None:
+        return None
+
+    # Handle Neo4j datetime objects
     if isinstance(input_date, neo4j_time.DateTime):
         return input_date.to_native()
 
-    if isinstance(input_date, str):
-        return datetime.fromisoformat(input_date)
+    # Handle FalkorDB native datetime
+    if isinstance(input_date, datetime):
+        from graphiti_core.utils.datetime_utils import ensure_utc
 
-    return input_date
+        return ensure_utc(input_date)
+
+    # Handle ISO strings (legacy FalkorDB, Neptune)
+    if isinstance(input_date, str):
+        # Handle Z timezone indicator
+        date_str = input_date.replace('Z', '+00:00')
+        return datetime.fromisoformat(date_str)
+
+    return None
 
 
 def get_default_group_id(provider: GraphProvider) -> str:

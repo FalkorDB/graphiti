@@ -35,7 +35,6 @@ else:
 
 from graphiti_core.driver.driver import GraphDriver, GraphDriverSession, GraphProvider
 from graphiti_core.graph_queries import get_fulltext_indices, get_range_indices
-from graphiti_core.utils.datetime_utils import convert_datetimes_to_strings
 
 logger = logging.getLogger(__name__)
 
@@ -101,12 +100,18 @@ class FalkorDriverSession(GraphDriverSession):
         # FalkorDB does not support argument for Label Set, so it's converted into an array of queries
         if isinstance(query, list):
             for cypher, params in query:
-                params = convert_datetimes_to_strings(params)
-                await self.graph.query(str(cypher), params)  # type: ignore[reportUnknownArgumentType]
+                # Inject localdatetime() wrappers for datetime parameters
+                modified_query, clean_params = FalkorDriver._inject_localdatetime_wrappers(
+                    str(cypher), params
+                )
+                await self.graph.query(modified_query, clean_params)  # type: ignore[reportUnknownArgumentType]
         else:
             params = dict(kwargs)
-            params = convert_datetimes_to_strings(params)
-            await self.graph.query(str(query), params)  # type: ignore[reportUnknownArgumentType]
+            # Inject localdatetime() wrappers for datetime parameters
+            modified_query, clean_params = FalkorDriver._inject_localdatetime_wrappers(
+                str(query), params
+            )
+            await self.graph.query(modified_query, clean_params)  # type: ignore[reportUnknownArgumentType]
         # Assuming `graph.query` is async (ideal); otherwise, wrap in executor
         return None
 
@@ -165,20 +170,91 @@ class FalkorDriver(GraphDriver):
             graph_name = self._database
         return self.client.select_graph(graph_name)
 
+    @staticmethod
+    def _inject_localdatetime_wrappers(
+        query: str, params: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        """
+        Replace datetime parameter placeholders with localdatetime() function calls.
+
+        FalkorDB does not accept Python datetime objects directly as parameters.
+        This method injects localdatetime() wrappers directly into the query string
+        for datetime parameters, enabling native temporal type storage.
+
+        Args:
+            query: Cypher query string with $param placeholders
+            params: Dictionary of query parameters
+
+        Returns:
+            Tuple of (modified_query, remaining_params) where datetime parameters
+            are injected into the query and removed from params
+
+        Example:
+            query: "CREATE (n {dt: $created_at})"
+            params: {"created_at": datetime(2024, 1, 1)}
+
+            Returns:
+                query: "CREATE (n {dt: localdatetime('2024-01-01T12:00:00+00:00')})"
+                params: {}  # created_at removed, now in query
+        """
+        from graphiti_core.utils.datetime_utils import ensure_utc
+
+        import re
+
+        modified_query = query
+        remaining_params = {}
+
+        for key, value in params.items():
+            placeholder = f'${key}'
+
+            if isinstance(value, datetime.datetime):
+                # Check if this parameter is already inside a localdatetime() call
+                # Pattern: localdatetime($key) or localdatetime( $key )
+                escaped_placeholder = re.escape(placeholder)
+                pattern = rf'localdatetime\s*\(\s*{escaped_placeholder}\s*\)'
+                is_wrapped = re.search(pattern, query, re.IGNORECASE)
+
+                if is_wrapped:
+                    # Already wrapped, keep as string parameter
+                    utc_dt = ensure_utc(value)
+                    if utc_dt is None:
+                        remaining_params[key] = None
+                    else:
+                        remaining_params[key] = utc_dt.isoformat()
+                else:
+                    # Not wrapped, inject inline
+                    utc_dt = ensure_utc(value)
+                    if utc_dt is None:
+                        # Skip None datetime values
+                        remaining_params[key] = None
+                        continue
+                    iso_str = utc_dt.isoformat()
+
+                    # Replace $param with localdatetime('ISO_STRING')
+                    replacement = f"localdatetime('{iso_str}')"
+                    modified_query = modified_query.replace(placeholder, replacement)
+                    # Don't include datetime param in remaining params (it's now in the query)
+            else:
+                # Keep non-datetime params
+                remaining_params[key] = value
+
+        return modified_query, remaining_params
+
     async def execute_query(self, cypher_query_, **kwargs: Any):
         graph = self._get_graph(self._database)
 
-        # Convert datetime objects to ISO strings (FalkorDB does not support datetime objects directly)
-        params = convert_datetimes_to_strings(dict(kwargs))
+        # Inject localdatetime() wrappers for datetime parameters
+        # This enables native temporal type storage in FalkorDB
+        modified_query, params = self._inject_localdatetime_wrappers(cypher_query_, dict(kwargs))
 
         try:
-            result = await graph.query(cypher_query_, params)  # type: ignore[reportUnknownArgumentType]
+            result = await graph.query(modified_query, params)  # type: ignore[reportUnknownArgumentType]
         except Exception as e:
             if 'already indexed' in str(e):
                 # check if index already exists
                 logger.info(f'Index already exists: {e}')
                 return None
-            logger.error(f'Error executing FalkorDB query: {e}\n{cypher_query_}\n{params}')
+            logger.error(f'Error executing FalkorDB query: {e}\n{modified_query}\n{params}')
             raise
 
         # Convert the result header to a list of strings
@@ -272,19 +348,6 @@ class FalkorDriver(GraphDriver):
         except Exception as e:
             print(f'FalkorDB health check failed: {e}')
             raise
-
-    @staticmethod
-    def convert_datetimes_to_strings(obj):
-        if isinstance(obj, dict):
-            return {k: FalkorDriver.convert_datetimes_to_strings(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [FalkorDriver.convert_datetimes_to_strings(item) for item in obj]
-        elif isinstance(obj, tuple):
-            return tuple(FalkorDriver.convert_datetimes_to_strings(item) for item in obj)
-        elif isinstance(obj, datetime):
-            return obj.isoformat()
-        else:
-            return obj
 
     def sanitize(self, query: str) -> str:
         """
