@@ -96,6 +96,9 @@ class TestFalkorDriver:
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
     async def test_execute_query_success(self):
         """Test successful query execution."""
+        # Set datetime support to skip detection
+        self.driver._supports_native_datetime = True
+
         mock_graph = MagicMock()
         mock_result = MagicMock()
         mock_result.header = [('col1', 'column1'), ('col2', 'column2')]
@@ -116,6 +119,9 @@ class TestFalkorDriver:
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
     async def test_execute_query_handles_index_already_exists_error(self):
         """Test handling of 'already indexed' error."""
+        # Set datetime support to skip detection
+        self.driver._supports_native_datetime = True
+
         mock_graph = MagicMock()
         mock_graph.query = AsyncMock(side_effect=Exception('Index already indexed'))
         self.mock_client.select_graph.return_value = mock_graph
@@ -130,6 +136,9 @@ class TestFalkorDriver:
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
     async def test_execute_query_propagates_other_exceptions(self):
         """Test that other exceptions are properly propagated."""
+        # Set datetime support to skip detection
+        self.driver._supports_native_datetime = True
+
         mock_graph = MagicMock()
         mock_graph.query = AsyncMock(side_effect=Exception('Other error'))
         self.mock_client.select_graph.return_value = mock_graph
@@ -144,6 +153,9 @@ class TestFalkorDriver:
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
     async def test_execute_query_injects_localdatetime_wrappers(self):
         """Test that datetime objects are injected as localdatetime() calls."""
+        # Set datetime support to True (native datetime enabled)
+        self.driver._supports_native_datetime = True
+
         mock_graph = MagicMock()
         mock_result = MagicMock()
         mock_result.header = []
@@ -234,7 +246,10 @@ class TestFalkorDriverSession:
     def setup_method(self):
         """Set up test fixtures."""
         self.mock_graph = MagicMock()
-        self.session = FalkorDriverSession(self.mock_graph)
+        # Create mock driver with datetime support already detected (to avoid detection query)
+        self.mock_driver = MagicMock()
+        self.mock_driver._supports_native_datetime = True
+        self.session = FalkorDriverSession(self.mock_graph, self.mock_driver)
 
     @pytest.mark.asyncio
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')

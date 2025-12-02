@@ -78,8 +78,9 @@ STOPWORDS = [
 class FalkorDriverSession(GraphDriverSession):
     provider = GraphProvider.FALKORDB
 
-    def __init__(self, graph: FalkorGraph):
+    def __init__(self, graph: FalkorGraph, driver: 'FalkorDriver'):
         self.graph = graph
+        self.driver = driver
 
     async def __aenter__(self):
         return self
@@ -97,19 +98,26 @@ class FalkorDriverSession(GraphDriverSession):
         return await func(self, *args, **kwargs)
 
     async def run(self, query: str | list, **kwargs: Any) -> Any:
+        # Ensure datetime support detection has run
+        if self.driver._supports_native_datetime is None:
+            await self.driver._initialize_datetime_support()
+
+        # Type assertion: after initialization, this is always bool
+        use_native = self.driver._supports_native_datetime if self.driver._supports_native_datetime is not None else True
+
         # FalkorDB does not support argument for Label Set, so it's converted into an array of queries
         if isinstance(query, list):
             for cypher, params in query:
                 # Inject localdatetime() wrappers for datetime parameters
                 modified_query, clean_params = FalkorDriver._inject_localdatetime_wrappers(
-                    str(cypher), params
+                    str(cypher), params, use_native_datetime=use_native
                 )
                 await self.graph.query(modified_query, clean_params)  # type: ignore[reportUnknownArgumentType]
         else:
             params = dict(kwargs)
             # Inject localdatetime() wrappers for datetime parameters
             modified_query, clean_params = FalkorDriver._inject_localdatetime_wrappers(
-                str(query), params
+                str(query), params, use_native_datetime=use_native
             )
             await self.graph.query(modified_query, clean_params)  # type: ignore[reportUnknownArgumentType]
         # Assuming `graph.query` is async (ideal); otherwise, wrap in executor
@@ -154,10 +162,15 @@ class FalkorDriver(GraphDriver):
         else:
             self.client = FalkorDB(host=host, port=port, username=username, password=password)
 
-        # Schedule the indices and constraints to be built
+        # Flag to track datetime support (None = not checked yet, True = supported, False = not supported)
+        self._supports_native_datetime: bool | None = None
+
+        # Schedule the indices and constraints to be built and datetime detection
         try:
             # Try to get the current event loop
             loop = asyncio.get_running_loop()
+            # Schedule datetime support detection
+            loop.create_task(self._initialize_datetime_support())
             # Schedule the build_indices_and_constraints to run
             loop.create_task(self.build_indices_and_constraints())
         except RuntimeError:
@@ -170,32 +183,198 @@ class FalkorDriver(GraphDriver):
             graph_name = self._database
         return self.client.select_graph(graph_name)
 
+    async def _initialize_datetime_support(self):
+        """
+        Check if FalkorDB supports native datetime on first connection.
+        Sets _supports_native_datetime flag for future queries.
+        """
+        if self._supports_native_datetime is None:
+            self._supports_native_datetime = await self._detect_datetime_support()
+
+            if self._supports_native_datetime:
+                logger.info('FalkorDB native datetime support: enabled')
+                # Check for legacy string dates if native datetime is supported
+                await self._check_for_legacy_datetime_strings()
+            else:
+                logger.warning(
+                    'FalkorDB native datetime support: disabled (using string format). '
+                    'String-based datetime is deprecated and will be removed in a future version. '
+                    'Please upgrade to FalkorDB v4.2.0+ for native datetime support.'
+                )
+
+    async def _detect_datetime_support(self) -> bool:
+        """
+        Test if FalkorDB supports localdatetime() function.
+
+        Returns:
+            True if localdatetime() is supported, False otherwise
+        """
+        try:
+            # Try to execute a simple localdatetime() query
+            graph = self._get_graph(self._database)
+            result = graph.query("RETURN localdatetime('2024-01-01T00:00:00Z') as dt")
+            # If query succeeds, localdatetime() is supported
+            return True
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Check for errors indicating the function doesn't exist
+            if 'unknown function' in error_msg or 'undefined function' in error_msg:
+                return False  # localdatetime() not available
+            # Other errors might indicate connection issues - log and assume not supported
+            logger.warning(f'Error detecting datetime support, assuming not supported: {e}')
+            return False
+
+    async def _check_for_legacy_datetime_strings(self):
+        """
+        Check if database contains legacy string-format datetime values.
+        Warns user if migration is needed.
+
+        This runs automatically on initialization when native datetime is supported.
+        """
+        try:
+            # Check for string-type created_at values in EntityNode using typeOf()
+            result = await self.execute_query("""
+                MATCH (n:EntityNode)
+                WHERE n.created_at IS NOT NULL AND typeOf(n.created_at) = 'String'
+                RETURN count(n) as legacy_count
+                LIMIT 1
+            """)
+
+            if result:
+                records, _, _ = result
+                if records and records[0].get('legacy_count', 0) > 0:
+                    logger.warning(
+                        'Legacy string-format datetime values detected in database. '
+                        'Run driver.migrate_string_dates_to_native() to convert old dates to native datetime format. '
+                        'String-format support will be removed in a future version.'
+                    )
+        except Exception as e:
+            # Silently fail if query syntax not supported or other issues
+            # This is just a helpful warning, not critical
+            logger.debug(f'Could not check for legacy datetime strings: {e}')
+
+    async def migrate_string_dates_to_native(self):
+        """
+        Migrate legacy string-format datetime values to native datetime.
+
+        This function converts old ISO string dates (e.g., '2024-01-01T00:00:00+00:00')
+        to native localdatetime values in FalkorDB.
+
+        Migrates datetime fields in:
+        - EntityNode: created_at
+        - EpisodeNode: created_at, valid_at
+        - EntityEdge: created_at, expired_at, invalid_at
+
+        Usage:
+            driver = FalkorDriver(...)
+            await driver.migrate_string_dates_to_native()
+
+        Note: This is a one-time migration. Run this after upgrading to FalkorDB
+        with native datetime support if you have existing data.
+        """
+        if not self._supports_native_datetime:
+            logger.warning('Native datetime not supported, skipping migration')
+            return
+
+        logger.info('Starting migration of legacy string dates to native datetime...')
+
+        migration_queries = [
+            # EntityNode.created_at
+            """
+            MATCH (n:EntityNode)
+            WHERE n.created_at IS NOT NULL AND typeOf(n.created_at) = 'String'
+            SET n.created_at = localdatetime(n.created_at)
+            RETURN count(n) as migrated
+            """,
+            # EpisodeNode.created_at
+            """
+            MATCH (n:EpisodeNode)
+            WHERE n.created_at IS NOT NULL AND typeOf(n.created_at) = 'String'
+            SET n.created_at = localdatetime(n.created_at)
+            RETURN count(n) as migrated
+            """,
+            # EpisodeNode.valid_at
+            """
+            MATCH (n:EpisodeNode)
+            WHERE n.valid_at IS NOT NULL AND typeOf(n.valid_at) = 'String'
+            SET n.valid_at = localdatetime(n.valid_at)
+            RETURN count(n) as migrated
+            """,
+            # EntityEdge.created_at
+            """
+            MATCH ()-[e:RELATES_TO]->()
+            WHERE e.created_at IS NOT NULL AND typeOf(e.created_at) = 'String'
+            SET e.created_at = localdatetime(e.created_at)
+            RETURN count(e) as migrated
+            """,
+            # EntityEdge.expired_at
+            """
+            MATCH ()-[e:RELATES_TO]->()
+            WHERE e.expired_at IS NOT NULL AND typeOf(e.expired_at) = 'String'
+            SET e.expired_at = localdatetime(e.expired_at)
+            RETURN count(e) as migrated
+            """,
+            # EntityEdge.invalid_at
+            """
+            MATCH ()-[e:RELATES_TO]->()
+            WHERE e.invalid_at IS NOT NULL AND typeOf(e.invalid_at) = 'String'
+            SET e.invalid_at = localdatetime(e.invalid_at)
+            RETURN count(e) as migrated
+            """,
+        ]
+
+        total_migrated = 0
+        for query in migration_queries:
+            try:
+                result = await self.execute_query(query)
+                if result:
+                    records, _, _ = result
+                    migrated = records[0].get('migrated', 0) if records else 0
+                    total_migrated += migrated
+            except Exception as e:
+                logger.error(f'Error during migration: {e}')
+                raise
+
+        logger.info(f'Migration complete! Converted {total_migrated} datetime fields to native format.')
+        return total_migrated
+
     @staticmethod
     def _inject_localdatetime_wrappers(
-        query: str, params: dict[str, Any]
+        query: str, params: dict[str, Any], use_native_datetime: bool = True
     ) -> tuple[str, dict[str, Any]]:
         """
-        Replace datetime parameter placeholders with localdatetime() function calls.
+        Convert datetime parameters based on FalkorDB version support.
 
         FalkorDB does not accept Python datetime objects directly as parameters.
-        This method injects localdatetime() wrappers directly into the query string
-        for datetime parameters, enabling native temporal type storage.
+        This method handles datetime parameters in two ways:
+        - If use_native_datetime=True: Injects localdatetime() wrappers for native temporal storage
+        - If use_native_datetime=False: Converts to ISO strings for backward compatibility
 
         Args:
             query: Cypher query string with $param placeholders
             params: Dictionary of query parameters
+            use_native_datetime: If True, use localdatetime() wrappers; if False, use ISO strings
 
         Returns:
-            Tuple of (modified_query, remaining_params) where datetime parameters
-            are injected into the query and removed from params
+            Tuple of (modified_query, remaining_params) where datetime parameters are processed
 
-        Example:
+        Example (native datetime):
             query: "CREATE (n {dt: $created_at})"
             params: {"created_at": datetime(2024, 1, 1)}
+            use_native_datetime: True
 
             Returns:
                 query: "CREATE (n {dt: localdatetime('2024-01-01T12:00:00+00:00')})"
                 params: {}  # created_at removed, now in query
+
+        Example (legacy string):
+            query: "CREATE (n {dt: $created_at})"
+            params: {"created_at": datetime(2024, 1, 1)}
+            use_native_datetime: False
+
+            Returns:
+                query: "CREATE (n {dt: $created_at})"  # UNCHANGED
+                params: {"created_at": "2024-01-01T12:00:00+00:00"}  # datetime → ISO string
         """
         from graphiti_core.utils.datetime_utils import ensure_utc
 
@@ -208,32 +387,32 @@ class FalkorDriver(GraphDriver):
             placeholder = f'${key}'
 
             if isinstance(value, datetime.datetime):
-                # Check if this parameter is already inside a localdatetime() call
-                # Pattern: localdatetime($key) or localdatetime( $key )
-                escaped_placeholder = re.escape(placeholder)
-                pattern = rf'localdatetime\s*\(\s*{escaped_placeholder}\s*\)'
-                is_wrapped = re.search(pattern, query, re.IGNORECASE)
+                utc_dt = ensure_utc(value)
+                if utc_dt is None:
+                    remaining_params[key] = None
+                    continue
 
-                if is_wrapped:
-                    # Already wrapped, keep as string parameter
-                    utc_dt = ensure_utc(value)
-                    if utc_dt is None:
-                        remaining_params[key] = None
+                iso_str = utc_dt.isoformat()
+
+                if use_native_datetime:
+                    # NEW: Use localdatetime() wrapper for native temporal type
+                    # Check if this parameter is already inside a localdatetime() call
+                    # Pattern: localdatetime($key) or localdatetime( $key )
+                    escaped_placeholder = re.escape(placeholder)
+                    pattern = rf'localdatetime\s*\(\s*{escaped_placeholder}\s*\)'
+                    is_wrapped = re.search(pattern, query, re.IGNORECASE)
+
+                    if is_wrapped:
+                        # Already wrapped, keep as string parameter
+                        remaining_params[key] = iso_str
                     else:
-                        remaining_params[key] = utc_dt.isoformat()
+                        # Not wrapped, inject inline
+                        replacement = f"localdatetime('{iso_str}')"
+                        modified_query = modified_query.replace(placeholder, replacement)
+                        # Don't include datetime param in remaining params (it's now in the query)
                 else:
-                    # Not wrapped, inject inline
-                    utc_dt = ensure_utc(value)
-                    if utc_dt is None:
-                        # Skip None datetime values
-                        remaining_params[key] = None
-                        continue
-                    iso_str = utc_dt.isoformat()
-
-                    # Replace $param with localdatetime('ISO_STRING')
-                    replacement = f"localdatetime('{iso_str}')"
-                    modified_query = modified_query.replace(placeholder, replacement)
-                    # Don't include datetime param in remaining params (it's now in the query)
+                    # OLD: Store as ISO string for backward compatibility
+                    remaining_params[key] = iso_str
             else:
                 # Keep non-datetime params
                 remaining_params[key] = value
@@ -241,11 +420,20 @@ class FalkorDriver(GraphDriver):
         return modified_query, remaining_params
 
     async def execute_query(self, cypher_query_, **kwargs: Any):
+        # Ensure datetime support detection has run
+        if self._supports_native_datetime is None:
+            await self._initialize_datetime_support()
+
+        # Type assertion: after initialization, this is always bool
+        use_native = self._supports_native_datetime if self._supports_native_datetime is not None else True
+
         graph = self._get_graph(self._database)
 
-        # Inject localdatetime() wrappers for datetime parameters
-        # This enables native temporal type storage in FalkorDB
-        modified_query, params = self._inject_localdatetime_wrappers(cypher_query_, dict(kwargs))
+        # Convert datetime parameters based on FalkorDB version support
+        # Uses native datetime if supported, otherwise falls back to ISO strings
+        modified_query, params = self._inject_localdatetime_wrappers(
+            cypher_query_, dict(kwargs), use_native_datetime=use_native
+        )
 
         try:
             result = await graph.query(modified_query, params)  # type: ignore[reportUnknownArgumentType]
@@ -275,7 +463,7 @@ class FalkorDriver(GraphDriver):
         return records, header, None
 
     def session(self, database: str | None = None) -> GraphDriverSession:
-        return FalkorDriverSession(self._get_graph(database))
+        return FalkorDriverSession(self._get_graph(database), self)
 
     async def close(self) -> None:
         """Close the driver connection."""
