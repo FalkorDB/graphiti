@@ -209,7 +209,7 @@ class FalkorDriver(GraphDriver):
         try:
             # Try to execute a simple localdatetime() query
             graph = self._get_graph(self._database)
-            result = graph.query("RETURN localdatetime('2024-01-01T00:00:00Z') as dt")
+            result = await graph.query("RETURN localdatetime('2024-01-01T00:00:00Z') as dt")  # type: ignore[reportUnknownArgumentType]
             # If query succeeds, localdatetime() is supported
             return True
         except Exception as e:
