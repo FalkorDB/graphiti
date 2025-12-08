@@ -102,24 +102,21 @@ class FalkorDriverSession(GraphDriverSession):
         if self.driver._supports_native_datetime is None:
             await self.driver._initialize_datetime_support()
 
-        # Type assertion: after initialization, this is always bool
-        use_native = self.driver._supports_native_datetime if self.driver._supports_native_datetime is not None else True
-
         # FalkorDB does not support argument for Label Set, so it's converted into an array of queries
         if isinstance(query, list):
             for cypher, params in query:
                 # Inject localdatetime() wrappers for datetime parameters
-                modified_query, clean_params = FalkorDriver._inject_localdatetime_wrappers(
-                    str(cypher), params, use_native_datetime=use_native
+                prepared_query, prepared_params = self.driver._inject_localdatetime_wrappers(
+                    str(cypher), params
                 )
-                await self.graph.query(modified_query, clean_params)  # type: ignore[reportUnknownArgumentType]
+                await self.graph.query(prepared_query, prepared_params)  # type: ignore[reportUnknownArgumentType]
         else:
             params = dict(kwargs)
             # Inject localdatetime() wrappers for datetime parameters
-            modified_query, clean_params = FalkorDriver._inject_localdatetime_wrappers(
-                str(query), params, use_native_datetime=use_native
+            prepared_query, prepared_params = self.driver._inject_localdatetime_wrappers(
+                str(query), params
             )
-            await self.graph.query(modified_query, clean_params)  # type: ignore[reportUnknownArgumentType]
+            await self.graph.query(prepared_query, prepared_params)  # type: ignore[reportUnknownArgumentType]
         # Assuming `graph.query` is async (ideal); otherwise, wrap in executor
         return None
 
@@ -232,9 +229,9 @@ class FalkorDriver(GraphDriver):
         This runs automatically on initialization when native datetime is supported.
         """
         try:
-            # Check for string-type created_at values in EntityNode using typeOf()
+            # Check for string-type created_at values in Entity using typeOf()
             result = await self.execute_query("""
-                MATCH (n:EntityNode)
+                MATCH (n:Entity)
                 WHERE n.created_at IS NOT NULL AND typeOf(n.created_at) = 'String'
                 RETURN count(n) as legacy_count
                 LIMIT 1
@@ -261,8 +258,8 @@ class FalkorDriver(GraphDriver):
         to native localdatetime values in FalkorDB.
 
         Migrates datetime fields in:
-        - EntityNode: created_at
-        - EpisodeNode: created_at, valid_at
+        - Entity: created_at
+        - Episodic: created_at, valid_at
         - EntityEdge: created_at, expired_at, invalid_at
 
         Usage:
@@ -279,23 +276,23 @@ class FalkorDriver(GraphDriver):
         logger.info('Starting migration of legacy string dates to native datetime...')
 
         migration_queries = [
-            # EntityNode.created_at
+            # Entity.created_at
             """
-            MATCH (n:EntityNode)
+            MATCH (n:Entity)
             WHERE n.created_at IS NOT NULL AND typeOf(n.created_at) = 'String'
             SET n.created_at = localdatetime(n.created_at)
             RETURN count(n) as migrated
             """,
-            # EpisodeNode.created_at
+            # Episodic.created_at
             """
-            MATCH (n:EpisodeNode)
+            MATCH (n:Episodic)
             WHERE n.created_at IS NOT NULL AND typeOf(n.created_at) = 'String'
             SET n.created_at = localdatetime(n.created_at)
             RETURN count(n) as migrated
             """,
-            # EpisodeNode.valid_at
+            # Episodic.valid_at
             """
-            MATCH (n:EpisodeNode)
+            MATCH (n:Episodic)
             WHERE n.valid_at IS NOT NULL AND typeOf(n.valid_at) = 'String'
             SET n.valid_at = localdatetime(n.valid_at)
             RETURN count(n) as migrated
@@ -338,50 +335,49 @@ class FalkorDriver(GraphDriver):
         logger.info(f'Migration complete! Converted {total_migrated} datetime fields to native format.')
         return total_migrated
 
-    @staticmethod
     def _inject_localdatetime_wrappers(
-        query: str, params: dict[str, Any], use_native_datetime: bool = True
+        self, query: str, params: dict[str, Any]
     ) -> tuple[str, dict[str, Any]]:
         """
         Convert datetime parameters based on FalkorDB version support.
 
         FalkorDB does not accept Python datetime objects directly as parameters.
         This method handles datetime parameters in two ways:
-        - If use_native_datetime=True: Injects localdatetime() wrappers for native temporal storage
-        - If use_native_datetime=False: Converts to ISO strings for backward compatibility
+        - If native datetime supported: Injects localdatetime() wrappers for native temporal storage
+        - If not supported: Converts to ISO strings for backward compatibility
 
         Args:
             query: Cypher query string with $param placeholders
             params: Dictionary of query parameters
-            use_native_datetime: If True, use localdatetime() wrappers; if False, use ISO strings
 
         Returns:
-            Tuple of (modified_query, remaining_params) where datetime parameters are processed
+            Tuple of (prepared_query, prepared_params) where datetime parameters are processed
 
         Example (native datetime):
             query: "CREATE (n {dt: $created_at})"
             params: {"created_at": datetime(2024, 1, 1)}
-            use_native_datetime: True
 
             Returns:
-                query: "CREATE (n {dt: localdatetime('2024-01-01T12:00:00+00:00')})"
-                params: {}  # created_at removed, now in query
+                prepared_query: "CREATE (n {dt: localdatetime('2024-01-01T12:00:00+00:00')})"
+                prepared_params: {}  # created_at removed, now in query
 
         Example (legacy string):
             query: "CREATE (n {dt: $created_at})"
             params: {"created_at": datetime(2024, 1, 1)}
-            use_native_datetime: False
 
             Returns:
-                query: "CREATE (n {dt: $created_at})"  # UNCHANGED
-                params: {"created_at": "2024-01-01T12:00:00+00:00"}  # datetime → ISO string
+                prepared_query: "CREATE (n {dt: $created_at})"  # UNCHANGED
+                prepared_params: {"created_at": "2024-01-01T12:00:00+00:00"}  # datetime → ISO string
         """
         from graphiti_core.utils.datetime_utils import ensure_utc
 
         import re
 
-        modified_query = query
-        remaining_params = {}
+        # Determine datetime conversion strategy based on detected support
+        use_native_datetime = self._supports_native_datetime if self._supports_native_datetime is not None else True
+
+        prepared_query = query
+        prepared_params = {}
 
         for key, value in params.items():
             placeholder = f'${key}'
@@ -389,7 +385,7 @@ class FalkorDriver(GraphDriver):
             if isinstance(value, datetime.datetime):
                 utc_dt = ensure_utc(value)
                 if utc_dt is None:
-                    remaining_params[key] = None
+                    prepared_params[key] = None
                     continue
 
                 iso_str = utc_dt.isoformat()
@@ -404,45 +400,42 @@ class FalkorDriver(GraphDriver):
 
                     if is_wrapped:
                         # Already wrapped, keep as string parameter
-                        remaining_params[key] = iso_str
+                        prepared_params[key] = iso_str
                     else:
                         # Not wrapped, inject inline
                         replacement = f"localdatetime('{iso_str}')"
-                        modified_query = modified_query.replace(placeholder, replacement)
-                        # Don't include datetime param in remaining params (it's now in the query)
+                        prepared_query = prepared_query.replace(placeholder, replacement)
+                        # Don't include datetime param in prepared params (it's now in the query)
                 else:
                     # OLD: Store as ISO string for backward compatibility
-                    remaining_params[key] = iso_str
+                    prepared_params[key] = iso_str
             else:
                 # Keep non-datetime params
-                remaining_params[key] = value
+                prepared_params[key] = value
 
-        return modified_query, remaining_params
+        return prepared_query, prepared_params
 
     async def execute_query(self, cypher_query_, **kwargs: Any):
         # Ensure datetime support detection has run
         if self._supports_native_datetime is None:
             await self._initialize_datetime_support()
 
-        # Type assertion: after initialization, this is always bool
-        use_native = self._supports_native_datetime if self._supports_native_datetime is not None else True
-
         graph = self._get_graph(self._database)
 
         # Convert datetime parameters based on FalkorDB version support
         # Uses native datetime if supported, otherwise falls back to ISO strings
-        modified_query, params = self._inject_localdatetime_wrappers(
-            cypher_query_, dict(kwargs), use_native_datetime=use_native
+        prepared_query, prepared_params = self._inject_localdatetime_wrappers(
+            cypher_query_, dict(kwargs)
         )
 
         try:
-            result = await graph.query(modified_query, params)  # type: ignore[reportUnknownArgumentType]
+            result = await graph.query(prepared_query, prepared_params)  # type: ignore[reportUnknownArgumentType]
         except Exception as e:
             if 'already indexed' in str(e):
                 # check if index already exists
                 logger.info(f'Index already exists: {e}')
                 return None
-            logger.error(f'Error executing FalkorDB query: {e}\n{modified_query}\n{params}')
+            logger.error(f'Error executing FalkorDB query: {e}\n{prepared_query}\n{prepared_params}')
             raise
 
         # Convert the result header to a list of strings
