@@ -48,11 +48,11 @@ class TestFalkorDriver:
         """Test initialization with connection parameters."""
         with patch('graphiti_core.driver.falkordb_driver.FalkorDB') as mock_falkor_db:
             driver = FalkorDriver(
-                host='test-host', port='1234', username='test-user', password='test-pass'
+                host='test-host', port=1234, username='test-user', password='test-pass'
             )
             assert driver.provider == GraphProvider.FALKORDB
             mock_falkor_db.assert_called_once_with(
-                host='test-host', port='1234', username='test-user', password='test-pass'
+                host='test-host', port=1234, username='test-user', password='test-pass'
             )
 
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
@@ -96,6 +96,9 @@ class TestFalkorDriver:
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
     async def test_execute_query_success(self):
         """Test successful query execution."""
+        # Set datetime support to skip detection
+        self.driver._supports_native_datetime = True
+
         mock_graph = MagicMock()
         mock_result = MagicMock()
         mock_result.header = [('col1', 'column1'), ('col2', 'column2')]
@@ -116,6 +119,9 @@ class TestFalkorDriver:
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
     async def test_execute_query_handles_index_already_exists_error(self):
         """Test handling of 'already indexed' error."""
+        # Set datetime support to skip detection
+        self.driver._supports_native_datetime = True
+
         mock_graph = MagicMock()
         mock_graph.query = AsyncMock(side_effect=Exception('Index already indexed'))
         self.mock_client.select_graph.return_value = mock_graph
@@ -130,6 +136,9 @@ class TestFalkorDriver:
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
     async def test_execute_query_propagates_other_exceptions(self):
         """Test that other exceptions are properly propagated."""
+        # Set datetime support to skip detection
+        self.driver._supports_native_datetime = True
+
         mock_graph = MagicMock()
         mock_graph.query = AsyncMock(side_effect=Exception('Other error'))
         self.mock_client.select_graph.return_value = mock_graph
@@ -142,8 +151,11 @@ class TestFalkorDriver:
 
     @pytest.mark.asyncio
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
-    async def test_execute_query_converts_datetime_parameters(self):
-        """Test that datetime objects in kwargs are converted to ISO strings."""
+    async def test_execute_query_injects_localdatetime_wrappers(self):
+        """Test that datetime objects are injected as localdatetime() calls."""
+        # Set datetime support to True (native datetime enabled)
+        self.driver._supports_native_datetime = True
+
         mock_graph = MagicMock()
         mock_result = MagicMock()
         mock_result.header = []
@@ -157,8 +169,18 @@ class TestFalkorDriver:
             'CREATE (n:Node) SET n.created_at = $created_at', created_at=test_datetime
         )
 
+        # Verify query was modified to include localdatetime()
         call_args = mock_graph.query.call_args[0]
-        assert call_args[1]['created_at'] == test_datetime.isoformat()
+        query_sent = call_args[0]
+        params_sent = call_args[1]
+
+        # Query should contain localdatetime() call
+        assert 'localdatetime(' in query_sent
+        assert '2024-01-01T12:00:00' in query_sent
+        assert '$created_at' not in query_sent  # Placeholder should be replaced
+
+        # Params should NOT contain created_at (it's in the query now)
+        assert 'created_at' not in params_sent
 
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
     def test_session_creation(self):
@@ -224,7 +246,10 @@ class TestFalkorDriverSession:
     def setup_method(self):
         """Set up test fixtures."""
         self.mock_graph = MagicMock()
-        self.session = FalkorDriverSession(self.mock_graph)
+        # Create mock driver with datetime support already detected (to avoid detection query)
+        self.mock_driver = MagicMock()
+        self.mock_driver._supports_native_datetime = True
+        self.session = FalkorDriverSession(self.mock_graph, self.mock_driver)
 
     @pytest.mark.asyncio
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
@@ -285,8 +310,8 @@ class TestFalkorDriverSession:
 
     @pytest.mark.asyncio
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
-    async def test_run_converts_datetime_objects_to_iso_strings(self):
-        """Test that datetime objects are converted to ISO strings."""
+    async def test_run_injects_localdatetime_wrappers(self):
+        """Test that datetime objects are injected as localdatetime() calls."""
         self.mock_graph.query = AsyncMock()
         test_datetime = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -296,70 +321,106 @@ class TestFalkorDriverSession:
 
         self.mock_graph.query.assert_called_once()
         call_args = self.mock_graph.query.call_args[0]
-        assert call_args[1]['created_at'] == test_datetime.isoformat()
+        query_sent = call_args[0]
+        params_sent = call_args[1]
+
+        # Query should contain localdatetime() call
+        assert 'localdatetime(' in query_sent
+        assert '2024-01-01T12:00:00' in query_sent
+        assert '$created_at' not in query_sent
+
+        # Params should NOT contain created_at (it's in the query now)
+        assert 'created_at' not in params_sent
 
 
-class TestDatetimeConversion:
-    """Test datetime conversion utility function."""
+class TestDatetimeInjection:
+    """Test datetime injection functionality."""
 
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
-    def test_convert_datetime_dict(self):
-        """Test datetime conversion in nested dictionary."""
-        from graphiti_core.driver.falkordb_driver import convert_datetimes_to_strings
+    def test_inject_localdatetime_single_param(self):
+        """Test injecting localdatetime() for a single datetime parameter."""
+        from graphiti_core.driver.falkordb_driver import FalkorDriver
 
         test_datetime = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        input_dict = {
-            'string_val': 'test',
-            'datetime_val': test_datetime,
-            'nested_dict': {'nested_datetime': test_datetime, 'nested_string': 'nested_test'},
-        }
+        query = 'CREATE (n {created_at: $dt})'
+        params = {'dt': test_datetime}
 
-        result = convert_datetimes_to_strings(input_dict)
+        modified_query, remaining_params = FalkorDriver._inject_localdatetime_wrappers(
+            query, params
+        )
 
-        assert result['string_val'] == 'test'
-        assert result['datetime_val'] == test_datetime.isoformat()
-        assert result['nested_dict']['nested_datetime'] == test_datetime.isoformat()
-        assert result['nested_dict']['nested_string'] == 'nested_test'
+        # Query should contain localdatetime() call
+        assert 'localdatetime(' in modified_query
+        assert '2024-01-01T12:00:00' in modified_query
+        assert '$dt' not in modified_query
+
+        # Params should NOT contain dt (it's in the query now)
+        assert 'dt' not in remaining_params
 
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
-    def test_convert_datetime_list_and_tuple(self):
-        """Test datetime conversion in lists and tuples."""
-        from graphiti_core.driver.falkordb_driver import convert_datetimes_to_strings
+    def test_inject_localdatetime_mixed_params(self):
+        """Test injecting datetime with other parameter types."""
+        from graphiti_core.driver.falkordb_driver import FalkorDriver
 
         test_datetime = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        query = 'CREATE (n {name: $name, created_at: $dt, value: $value})'
+        params = {'name': 'test', 'dt': test_datetime, 'value': 42}
 
-        # Test list
-        input_list = ['test', test_datetime, ['nested', test_datetime]]
-        result_list = convert_datetimes_to_strings(input_list)
-        assert result_list[0] == 'test'
-        assert result_list[1] == test_datetime.isoformat()
-        assert result_list[2][1] == test_datetime.isoformat()
+        modified_query, remaining_params = FalkorDriver._inject_localdatetime_wrappers(
+            query, params
+        )
 
-        # Test tuple
-        input_tuple = ('test', test_datetime)
-        result_tuple = convert_datetimes_to_strings(input_tuple)
-        assert isinstance(result_tuple, tuple)
-        assert result_tuple[0] == 'test'
-        assert result_tuple[1] == test_datetime.isoformat()
+        # Query should contain localdatetime() call for datetime param
+        assert 'localdatetime(' in modified_query
+        assert '2024-01-01T12:00:00' in modified_query
+        assert '$dt' not in modified_query
 
-    @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
-    def test_convert_single_datetime(self):
-        """Test datetime conversion for single datetime object."""
-        from graphiti_core.driver.falkordb_driver import convert_datetimes_to_strings
-
-        test_datetime = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        result = convert_datetimes_to_strings(test_datetime)
-        assert result == test_datetime.isoformat()
+        # Other params should remain
+        assert '$name' in modified_query
+        assert '$value' in modified_query
+        assert remaining_params == {'name': 'test', 'value': 42}
 
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
-    def test_convert_other_types_unchanged(self):
-        """Test that non-datetime types are returned unchanged."""
-        from graphiti_core.driver.falkordb_driver import convert_datetimes_to_strings
+    def test_inject_localdatetime_multiple_datetime_params(self):
+        """Test injecting multiple datetime parameters."""
+        from graphiti_core.driver.falkordb_driver import FalkorDriver
 
-        assert convert_datetimes_to_strings('string') == 'string'
-        assert convert_datetimes_to_strings(123) == 123
-        assert convert_datetimes_to_strings(None) is None
-        assert convert_datetimes_to_strings(True) is True
+        dt1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        dt2 = datetime(2024, 6, 1, tzinfo=timezone.utc)
+        query = 'CREATE (n {start: $start_dt, end: $end_dt})'
+        params = {'start_dt': dt1, 'end_dt': dt2}
+
+        modified_query, remaining_params = FalkorDriver._inject_localdatetime_wrappers(
+            query, params
+        )
+
+        # Both datetime calls should be injected
+        assert modified_query.count('localdatetime(') == 2
+        assert '2024-01-01' in modified_query
+        assert '2024-06-01' in modified_query
+        assert '$start_dt' not in modified_query
+        assert '$end_dt' not in modified_query
+
+        # No remaining params
+        assert len(remaining_params) == 0
+
+    @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
+    def test_inject_localdatetime_no_datetime_params(self):
+        """Test that non-datetime params are not modified."""
+        from graphiti_core.driver.falkordb_driver import FalkorDriver
+
+        query = 'CREATE (n {name: $name, value: $value})'
+        params = {'name': 'test', 'value': 42}
+
+        modified_query, remaining_params = FalkorDriver._inject_localdatetime_wrappers(
+            query, params
+        )
+
+        # Query should be unchanged
+        assert modified_query == query
+
+        # Params should be unchanged
+        assert remaining_params == params
 
 
 # Simple integration test
@@ -373,7 +434,7 @@ class TestFalkorDriverIntegration:
         pytest.importorskip('falkordb')
 
         falkor_host = os.getenv('FALKORDB_HOST', 'localhost')
-        falkor_port = os.getenv('FALKORDB_PORT', '6379')
+        falkor_port = int(os.getenv('FALKORDB_PORT', '6379'))
 
         try:
             driver = FalkorDriver(host=falkor_host, port=falkor_port)
@@ -390,3 +451,61 @@ class TestFalkorDriverIntegration:
 
         except Exception as e:
             pytest.skip(f'FalkorDB not available for integration test: {e}')
+
+    @pytest.mark.asyncio
+    @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
+    async def test_datetime_native_storage_roundtrip(self):
+        """Test datetime is stored natively and supports comparisons."""
+        pytest.importorskip('falkordb')
+
+        falkor_host = os.getenv('FALKORDB_HOST', 'localhost')
+        falkor_port = int(os.getenv('FALKORDB_PORT', '6379'))
+
+        try:
+            driver = FalkorDriver(host=falkor_host, port=falkor_port)
+
+            test_datetime = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+            # Store node with datetime
+            await driver.execute_query(
+                "CREATE (n:TestNode {name: 'datetime_test', created_at: $created_at})",
+                created_at=test_datetime,
+            )
+
+            # Retrieve and verify native datetime
+            result = await driver.execute_query(
+                "MATCH (n:TestNode {name: 'datetime_test'}) RETURN n.created_at as dt"
+            )
+            records, _, _ = result
+
+            retrieved_date = records[0]['dt']
+
+            # Should be datetime object
+            assert isinstance(retrieved_date, datetime)
+            assert retrieved_date.year == 2024
+            assert retrieved_date.month == 1
+
+            # Test datetime comparison (only works with native datetime)
+            result = await driver.execute_query(
+                'MATCH (n:TestNode) '
+                "WHERE n.created_at > localdatetime('2023-01-01T00:00:00') "
+                'RETURN count(n) as cnt'
+            )
+            records, _, _ = result
+            assert records[0]['cnt'] == 1  # Should find our node
+
+            # Test datetime comparison with different threshold
+            result = await driver.execute_query(
+                'MATCH (n:TestNode) '
+                "WHERE n.created_at > localdatetime('2024-06-01T00:00:00') "
+                'RETURN count(n) as cnt'
+            )
+            records, _, _ = result
+            assert records[0]['cnt'] == 0  # Should NOT find our node
+
+            # Cleanup
+            await driver.execute_query("MATCH (n:TestNode {name: 'datetime_test'}) DELETE n")
+            await driver.close()
+
+        except Exception as e:
+            pytest.skip(f'FalkorDB not available for datetime integration test: {e}')
